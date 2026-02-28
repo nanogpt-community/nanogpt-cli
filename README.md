@@ -55,6 +55,8 @@ You can authenticate with:
 
 - `Tab`: switch focus (conversations/input)
 - `Enter`: send message (input) or open selected conversation (list)
+- `Shift+Enter`: line break in composer input
+- `Ctrl+J`: line break fallback for terminals that remap `Shift+Enter`
 - `Ctrl+N`: create new conversation
 - `Ctrl+R`: reload conversation list
 - `Ctrl+S`: save current conversation

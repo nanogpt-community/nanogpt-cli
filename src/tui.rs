@@ -443,12 +443,13 @@ impl App {
             frame.area(),
         );
 
+        let composer_height = self.composer_height(frame.area());
         let root = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(4),
                 Constraint::Min(3),
-                Constraint::Length(4),
+                Constraint::Length(composer_height),
                 Constraint::Length(3),
             ])
             .split(frame.area());
@@ -469,6 +470,32 @@ impl App {
                 Modal::Help => self.render_help_modal(frame),
             }
         }
+    }
+
+    fn composer_height(&self, frame_area: Rect) -> u16 {
+        const HEADER_HEIGHT: u16 = 4;
+        const FOOTER_HEIGHT: u16 = 3;
+        const BODY_MIN_HEIGHT: u16 = 3;
+        const COMPOSER_MIN_HEIGHT: u16 = 4;
+        const COMPOSER_MAX_HEIGHT: u16 = 14;
+        const COMPOSER_OVERHEAD_LINES: u16 = 4; // spacer + hint + borders
+
+        let content_width = frame_area.width.saturating_sub(2).max(1) as usize;
+        let input_lines = if self.input.is_empty() {
+            1
+        } else {
+            wrapped_visual_lines(&self.input, content_width) as u16
+        };
+        let desired_height = input_lines.saturating_add(COMPOSER_OVERHEAD_LINES);
+        let max_height_for_layout = frame_area
+            .height
+            .saturating_sub(HEADER_HEIGHT + FOOTER_HEIGHT + BODY_MIN_HEIGHT)
+            .max(COMPOSER_MIN_HEIGHT);
+
+        desired_height.clamp(
+            COMPOSER_MIN_HEIGHT,
+            COMPOSER_MAX_HEIGHT.min(max_height_for_layout),
+        )
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
@@ -740,14 +767,22 @@ impl App {
     fn render_input(&self, frame: &mut Frame, area: Rect) {
         let theme = ui_theme();
         let count = self.input.chars().count();
-        let placeholder = "Type a message or /command. Enter to send.";
-        let input_line = if self.input.is_empty() {
-            Line::from(Span::styled(placeholder, Style::default().fg(theme.muted)))
+        let placeholder = "Type a message or /command. Enter to send, Shift+Enter for newline.";
+        let mut lines = if self.input.is_empty() {
+            vec![Line::from(Span::styled(
+                placeholder,
+                Style::default().fg(theme.muted),
+            ))]
         } else {
-            Line::from(Span::styled(
-                self.input.as_str(),
-                Style::default().fg(theme.text),
-            ))
+            self.input
+                .split('\n')
+                .map(|line| {
+                    Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(theme.text),
+                    ))
+                })
+                .collect()
         };
         let hint_line = Line::from(vec![
             Span::styled("Ctrl+M", Style::default().fg(theme.accent)),
@@ -760,8 +795,10 @@ impl App {
             Span::styled(" web search  ", Style::default().fg(theme.muted)),
             Span::styled(format!("{count} chars"), Style::default().fg(theme.warning)),
         ]);
+        lines.push(Line::raw(""));
+        lines.push(hint_line);
 
-        let input = Paragraph::new(vec![input_line, Line::raw(""), hint_line])
+        let input = Paragraph::new(lines)
             .block(
                 Block::default()
                     .title(Line::from(vec![
@@ -794,12 +831,19 @@ impl App {
         frame.render_widget(input, area);
 
         if self.focus == Focus::Input && self.modal.is_none() {
+            let content_width = area.width.saturating_sub(2).max(1) as usize;
+            let (cursor_line, cursor_col) =
+                cursor_line_col(&self.input, self.cursor, content_width);
             let cursor_x = area
                 .x
-                .saturating_add(self.cursor as u16)
+                .saturating_add(cursor_col as u16)
                 .saturating_add(1)
                 .min(area.x + area.width.saturating_sub(2));
-            let cursor_y = area.y + 1;
+            let cursor_y = area
+                .y
+                .saturating_add(cursor_line as u16)
+                .saturating_add(1)
+                .min(area.y + area.height.saturating_sub(2));
             frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
@@ -887,6 +931,8 @@ impl App {
             Span::styled(" focus  ", Style::default().fg(theme.muted)),
             Span::styled("Enter", Style::default().fg(theme.accent)),
             Span::styled(" send/open  ", Style::default().fg(theme.muted)),
+            Span::styled("Shift+Enter", Style::default().fg(theme.accent)),
+            Span::styled(" newline  ", Style::default().fg(theme.muted)),
             Span::styled("Ctrl+N", Style::default().fg(theme.accent)),
             Span::styled(" new  ", Style::default().fg(theme.muted)),
             Span::styled("Ctrl+H", Style::default().fg(theme.accent)),
@@ -1452,7 +1498,7 @@ impl App {
         let area = centered_rect(frame.area(), 75, 60);
         frame.render_widget(Clear, area);
 
-        let text = "Global\n  Esc / Ctrl+C  quit\n  Tab           switch focus\n  Ctrl+N        new conversation\n  Ctrl+R        reload conversations\n  Ctrl+S        save conversation\n  Ctrl+M        open model gallery\n  Ctrl+P        provider routing for current model\n  Ctrl+G        web provider/mode selector\n  Ctrl+W        open web search lab\n\nConversations pane\n  Up/Down       select conversation\n  Enter         open selected\n  D / Delete    delete selected\n\nComposer pane\n  Enter         send message\n  /help /model /webmode /system /clear /save /history\n\nPress Esc to close.";
+        let text = "Global\n  Esc / Ctrl+C  quit\n  Tab           switch focus\n  Ctrl+N        new conversation\n  Ctrl+R        reload conversations\n  Ctrl+S        save conversation\n  Ctrl+M        open model gallery\n  Ctrl+P        provider routing for current model\n  Ctrl+G        web provider/mode selector\n  Ctrl+W        open web search lab\n\nConversations pane\n  Up/Down       select conversation\n  Enter         open selected\n  D / Delete    delete selected\n\nComposer pane\n  Enter         send message\n  Shift+Enter   line break\n  Ctrl+J        line break (terminal fallback)\n  /help /model /webmode /system /clear /save /history\n\nPress Esc to close.";
 
         let widget = Paragraph::new(text).wrap(Wrap { trim: false }).block(
             Block::default()
@@ -1665,6 +1711,11 @@ impl App {
     fn handle_input_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Enter => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.insert_input_newline();
+                    return Ok(());
+                }
+
                 if self.pending {
                     self.status = "Request in progress".to_string();
                     return Ok(());
@@ -1694,6 +1745,12 @@ impl App {
                 } else {
                     self.send_message(input)?;
                 }
+            }
+            KeyCode::Char(c)
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && c.eq_ignore_ascii_case(&'j') =>
+            {
+                self.insert_input_newline();
             }
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor, c);
@@ -1737,6 +1794,12 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn insert_input_newline(&mut self) {
+        self.input.insert(self.cursor, '\n');
+        self.cursor += 1;
+        self.sync_slash_suggestion_index();
     }
 
     fn handle_modal_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -2826,6 +2889,54 @@ fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
         .split(vertical[1]);
 
     horizontal[1]
+}
+
+fn wrapped_visual_lines(input: &str, content_width: usize) -> usize {
+    let width = content_width.max(1);
+    let mut lines = 1usize;
+    let mut col = 0usize;
+
+    for byte in input.bytes() {
+        if byte == b'\n' {
+            lines += 1;
+            col = 0;
+            continue;
+        }
+
+        if col >= width {
+            lines += 1;
+            col = 0;
+        }
+        col += 1;
+    }
+
+    lines
+}
+
+fn cursor_line_col(input: &str, cursor: usize, content_width: usize) -> (usize, usize) {
+    let width = content_width.max(1);
+    let safe_cursor = cursor.min(input.len());
+    let mut line = 0usize;
+    let mut col = 0usize;
+
+    for (idx, byte) in input.bytes().enumerate() {
+        if idx >= safe_cursor {
+            break;
+        }
+
+        if byte == b'\n' {
+            line += 1;
+            col = 0;
+        } else {
+            if col >= width {
+                line += 1;
+                col = 0;
+            }
+            col += 1;
+        }
+    }
+
+    (line, col)
 }
 
 fn encode_path_segment(value: &str) -> String {

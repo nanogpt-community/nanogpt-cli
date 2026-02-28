@@ -1,9 +1,10 @@
 [package]
 name = "nanogpt-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Rust CLI/TUI client for the NanoGPT API"
 license = "MIT"
+authors = ["0xgingi <0xgingi@0xgingi.com>"]
 
 [dependencies]
 anyhow = "1.0"
