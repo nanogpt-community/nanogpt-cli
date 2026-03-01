@@ -106,6 +106,10 @@ pub struct TuiArgs {
     #[arg(long, default_value = "openai/gpt-5.2")]
     pub model: String,
 
+    /// Workspace root for agent tools (defaults to current directory)
+    #[arg(long)]
+    pub workspace: Option<PathBuf>,
+
     /// Optional system prompt
     #[arg(long)]
     pub system: Option<String>,
@@ -148,6 +152,7 @@ impl Default for TuiArgs {
     fn default() -> Self {
         Self {
             model: "openai/gpt-5.2".to_string(),
+            workspace: None,
             system: None,
             conversation: None,
             web: false,

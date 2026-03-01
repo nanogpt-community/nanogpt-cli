@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -17,12 +18,11 @@ use reqwest::Method;
 use serde_json::{Map, Value, json};
 use url::form_urlencoded::byte_serialize;
 
+use crate::agent::{AgentTurnRequest, AgentTurnResult, run_agent_turn};
 use crate::app_config::{AppConfig, load_config, save_config};
 use crate::cli::{ModelScope, TuiArgs};
-use crate::client::{ChatRequest, NanoGptClient};
-use crate::conversation::{
-    self as conv_store, Conversation, ConversationMessage, ConversationSummary,
-};
+use crate::client::NanoGptClient;
+use crate::conversation::{self as conv_store, Conversation, ConversationSummary};
 use crate::model_mode::{
     WebMode, apply_web_mode, infer_from_flags, infer_from_model, parse_web_mode_arg,
     web_mode_display, web_mode_from_key, web_mode_key, web_mode_presets,
@@ -320,6 +320,21 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         takes_argument: false,
         description: "Open provider picker",
     },
+    SlashCommandSpec {
+        command: "/workspace",
+        takes_argument: false,
+        description: "Show active workspace root",
+    },
+    SlashCommandSpec {
+        command: "/approve",
+        takes_argument: true,
+        description: "Approve sensitive tool(s) for next turn",
+    },
+    SlashCommandSpec {
+        command: "/approvals",
+        takes_argument: false,
+        description: "Show queued approvals",
+    },
 ];
 
 #[derive(Clone, Copy)]
@@ -368,6 +383,7 @@ fn ui_theme() -> UiTheme {
 struct App {
     client: NanoGptClient,
     args: TuiArgs,
+    workspace_root: PathBuf,
     conversation: Conversation,
     conversations: Vec<ConversationSummary>,
     selected_conversation_idx: usize,
@@ -382,12 +398,14 @@ struct App {
     chat_scroll: u16,
     status: String,
     pending: bool,
-    response_rx: Option<Receiver<anyhow::Result<String>>>,
+    response_rx: Option<Receiver<anyhow::Result<AgentTurnResult>>>,
     pending_user: Option<String>,
+    pending_approvals: Vec<String>,
 }
 
 impl App {
     fn new(client: NanoGptClient, args: TuiArgs, conversation: Conversation) -> Result<Self> {
+        let workspace_root = resolve_workspace_root(args.workspace.as_deref())?;
         let current_model = if conversation.model.is_empty() {
             apply_web_mode(&args.model, &infer_from_flags(args.web, args.deep_web))
         } else {
@@ -404,6 +422,7 @@ impl App {
         let mut app = Self {
             client,
             args: args.clone(),
+            workspace_root,
             conversation,
             conversations: vec![],
             selected_conversation_idx: 0,
@@ -420,6 +439,7 @@ impl App {
             pending: false,
             response_rx: None,
             pending_user: None,
+            pending_approvals: vec![],
         };
 
         app.reload_conversations()?;
@@ -534,6 +554,11 @@ impl App {
                     Style::default()
                         .fg(theme.accent_2)
                         .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  |  Workspace ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    truncate_middle(&self.workspace_root.display().to_string(), 34),
+                    Style::default().fg(theme.text),
                 ),
                 Span::styled("  |  Focus ", Style::default().fg(theme.muted)),
                 Span::styled(active_focus, Style::default().fg(theme.accent)),
@@ -1498,7 +1523,7 @@ impl App {
         let area = centered_rect(frame.area(), 75, 60);
         frame.render_widget(Clear, area);
 
-        let text = "Global\n  Esc / Ctrl+C  quit\n  Tab           switch focus\n  Ctrl+N        new conversation\n  Ctrl+R        reload conversations\n  Ctrl+S        save conversation\n  Ctrl+M        open model gallery\n  Ctrl+P        provider routing for current model\n  Ctrl+G        web provider/mode selector\n  Ctrl+W        open web search lab\n\nConversations pane\n  Up/Down       select conversation\n  Enter         open selected\n  D / Delete    delete selected\n\nComposer pane\n  Enter         send message\n  Shift+Enter   line break\n  Ctrl+J        line break (terminal fallback)\n  /help /model /webmode /system /clear /save /history\n\nPress Esc to close.";
+        let text = "Global\n  Esc / Ctrl+C  quit\n  Tab           switch focus\n  Ctrl+N        new conversation\n  Ctrl+R        reload conversations\n  Ctrl+S        save conversation\n  Ctrl+M        open model gallery\n  Ctrl+P        provider routing for current model\n  Ctrl+G        web provider/mode selector\n  Ctrl+W        open web search lab\n\nConversations pane\n  Up/Down       select conversation\n  Enter         open selected\n  D / Delete    delete selected\n\nComposer pane\n  Enter         send message\n  Shift+Enter   line break\n  Ctrl+J        line break (terminal fallback)\n  /help /model /webmode /system /clear /save /history /workspace\n  /approve <tool|all> /approvals\n\nAgent mode\n  Sensitive tools require explicit approval for the next turn\n  Tools run inside the active workspace root\n\nPress Esc to close.";
 
         let widget = Paragraph::new(text).wrap(Wrap { trim: false }).block(
             Block::default()
@@ -2164,6 +2189,26 @@ impl App {
                 let model = self.current_model_base().to_string();
                 self.open_provider_picker(&model)?;
             }
+            "/workspace" => {
+                self.status = format!("Workspace: {}", self.workspace_root.display());
+            }
+            "/approve" => {
+                if arg.is_empty() {
+                    self.status = "Usage: /approve <tool|all>".to_string();
+                } else {
+                    self.pending_approvals.clear();
+                    self.pending_approvals.push(arg.to_lowercase());
+                    self.status = format!("Queued approval for next turn: {}", arg.to_lowercase());
+                }
+            }
+            "/approvals" => {
+                if self.pending_approvals.is_empty() {
+                    self.status = "No approvals queued".to_string();
+                } else {
+                    self.status =
+                        format!("Queued approvals: {}", self.pending_approvals.join(", "));
+                }
+            }
             _ => {
                 self.status = format!("Unknown command: {cmd}");
             }
@@ -2184,19 +2229,15 @@ impl App {
         }
 
         self.pending = true;
-        self.status = "Waiting for model response...".to_string();
+        self.status = "Agent planning and calling tools...".to_string();
         self.pending_user = Some(input.clone());
+        let approval_grants = std::mem::take(&mut self.pending_approvals);
 
-        let mut outgoing = self.conversation.messages.clone();
-        outgoing.push(ConversationMessage {
-            role: "user".to_string(),
-            content: input,
-        });
-
-        let request = ChatRequest {
+        let request = AgentTurnRequest {
             model: self.current_model.clone(),
             system_prompt: self.conversation.system_prompt.clone(),
-            messages: outgoing,
+            messages: self.conversation.messages.clone(),
+            user_input: input,
             temperature: self.args.temperature,
             max_tokens: self.args.max_tokens,
             top_p: self.args.top_p,
@@ -2206,13 +2247,15 @@ impl App {
             provider: self
                 .active_provider_for_current_model()
                 .map(|v| v.to_string()),
+            workspace_root: self.workspace_root.clone(),
+            approval_grants,
         };
 
         let (tx, rx) = mpsc::channel();
         let client = self.client.clone();
 
         std::thread::spawn(move || {
-            let result = client.chat_completion(&request).map(|r| r.content);
+            let result = run_agent_turn(client, request);
             let _ = tx.send(result);
         });
 
@@ -2233,13 +2276,22 @@ impl App {
                     self.response_rx = None;
 
                     match result {
-                        Ok(content) => {
+                        Ok(turn) => {
                             self.conversation.push_user_message(user);
-                            self.conversation.push_assistant_message(content);
+                            self.conversation
+                                .push_assistant_message(turn.assistant_message);
                             self.conversation.model = self.current_model.clone();
                             self.conversation.save()?;
                             self.reload_conversations()?;
-                            self.status = "Response received".to_string();
+                            self.status = if turn.tool_call_count == 0 {
+                                "Response received".to_string()
+                            } else {
+                                format!(
+                                    "Response received ({} tool call{})",
+                                    turn.tool_call_count,
+                                    if turn.tool_call_count == 1 { "" } else { "s" }
+                                )
+                            };
                         }
                         Err(err) => {
                             self.status = format!("Request failed: {err}");
@@ -2937,6 +2989,26 @@ fn cursor_line_col(input: &str, cursor: usize, content_width: usize) -> (usize, 
     }
 
     (line, col)
+}
+
+fn resolve_workspace_root(workspace: Option<&Path>) -> Result<PathBuf> {
+    let base = match workspace {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().context("failed to resolve current directory")?,
+    };
+
+    let canonical = base
+        .canonicalize()
+        .with_context(|| format!("failed to resolve workspace {}", base.display()))?;
+
+    if !canonical.is_dir() {
+        return Err(anyhow!(
+            "workspace is not a directory: {}",
+            canonical.display()
+        ));
+    }
+
+    Ok(canonical)
 }
 
 fn encode_path_segment(value: &str) -> String {

@@ -1,3 +1,4 @@
+mod agent;
 mod app_config;
 mod chat;
 mod cli;
