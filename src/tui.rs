@@ -325,16 +325,6 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         takes_argument: false,
         description: "Show active workspace root",
     },
-    SlashCommandSpec {
-        command: "/approve",
-        takes_argument: true,
-        description: "Approve sensitive tool(s) for next turn",
-    },
-    SlashCommandSpec {
-        command: "/approvals",
-        takes_argument: false,
-        description: "Show queued approvals",
-    },
 ];
 
 #[derive(Clone, Copy)]
@@ -400,7 +390,6 @@ struct App {
     pending: bool,
     response_rx: Option<Receiver<anyhow::Result<AgentTurnResult>>>,
     pending_user: Option<String>,
-    pending_approvals: Vec<String>,
 }
 
 impl App {
@@ -439,7 +428,6 @@ impl App {
             pending: false,
             response_rx: None,
             pending_user: None,
-            pending_approvals: vec![],
         };
 
         app.reload_conversations()?;
@@ -1523,7 +1511,7 @@ impl App {
         let area = centered_rect(frame.area(), 75, 60);
         frame.render_widget(Clear, area);
 
-        let text = "Global\n  Esc / Ctrl+C  quit\n  Tab           switch focus\n  Ctrl+N        new conversation\n  Ctrl+R        reload conversations\n  Ctrl+S        save conversation\n  Ctrl+M        open model gallery\n  Ctrl+P        provider routing for current model\n  Ctrl+G        web provider/mode selector\n  Ctrl+W        open web search lab\n\nConversations pane\n  Up/Down       select conversation\n  Enter         open selected\n  D / Delete    delete selected\n\nComposer pane\n  Enter         send message\n  Shift+Enter   line break\n  Ctrl+J        line break (terminal fallback)\n  /help /model /webmode /system /clear /save /history /workspace\n  /approve <tool|all> /approvals\n\nAgent mode\n  Sensitive tools require explicit approval for the next turn\n  Tools run inside the active workspace root\n\nPress Esc to close.";
+        let text = "Global\n  Esc / Ctrl+C  quit\n  Tab           switch focus\n  Ctrl+N        new conversation\n  Ctrl+R        reload conversations\n  Ctrl+S        save conversation\n  Ctrl+M        open model gallery\n  Ctrl+P        provider routing for current model\n  Ctrl+G        web provider/mode selector\n  Ctrl+W        open web search lab\n\nConversations pane\n  Up/Down       select conversation\n  Enter         open selected\n  D / Delete    delete selected\n\nComposer pane\n  Enter         send message\n  Shift+Enter   line break\n  Ctrl+J        line break (terminal fallback)\n  /help /model /webmode /system /clear /save /history /workspace\n\nAgent mode\n  Tool calls run directly inside the active workspace root\n\nPress Esc to close.";
 
         let widget = Paragraph::new(text).wrap(Wrap { trim: false }).block(
             Block::default()
@@ -2192,23 +2180,6 @@ impl App {
             "/workspace" => {
                 self.status = format!("Workspace: {}", self.workspace_root.display());
             }
-            "/approve" => {
-                if arg.is_empty() {
-                    self.status = "Usage: /approve <tool|all>".to_string();
-                } else {
-                    self.pending_approvals.clear();
-                    self.pending_approvals.push(arg.to_lowercase());
-                    self.status = format!("Queued approval for next turn: {}", arg.to_lowercase());
-                }
-            }
-            "/approvals" => {
-                if self.pending_approvals.is_empty() {
-                    self.status = "No approvals queued".to_string();
-                } else {
-                    self.status =
-                        format!("Queued approvals: {}", self.pending_approvals.join(", "));
-                }
-            }
             _ => {
                 self.status = format!("Unknown command: {cmd}");
             }
@@ -2231,7 +2202,6 @@ impl App {
         self.pending = true;
         self.status = "Agent planning and calling tools...".to_string();
         self.pending_user = Some(input.clone());
-        let approval_grants = std::mem::take(&mut self.pending_approvals);
 
         let request = AgentTurnRequest {
             model: self.current_model.clone(),
@@ -2248,7 +2218,6 @@ impl App {
                 .active_provider_for_current_model()
                 .map(|v| v.to_string()),
             workspace_root: self.workspace_root.clone(),
-            approval_grants,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -2294,15 +2263,33 @@ impl App {
                             };
                         }
                         Err(err) => {
-                            self.status = format!("Request failed: {err}");
+                            let err_text = err.to_string();
+                            if !user.is_empty() {
+                                self.conversation.push_user_message(user);
+                                self.conversation
+                                    .push_assistant_message(format!("[error] {err_text}"));
+                                self.conversation.model = self.current_model.clone();
+                                self.conversation.save()?;
+                                self.reload_conversations()?;
+                            }
+                            self.status = format!("Request failed: {err_text}");
                         }
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.pending = false;
-                    self.pending_user = None;
+                    let user = self.pending_user.take().unwrap_or_default();
                     self.response_rx = None;
+                    if !user.is_empty() {
+                        self.conversation.push_user_message(user);
+                        self.conversation.push_assistant_message(
+                            "[error] Request channel disconnected".to_string(),
+                        );
+                        self.conversation.model = self.current_model.clone();
+                        self.conversation.save()?;
+                        self.reload_conversations()?;
+                    }
                     self.status = "Request channel disconnected".to_string();
                 }
             }

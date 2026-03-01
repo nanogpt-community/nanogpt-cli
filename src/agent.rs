@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -42,7 +42,6 @@ pub struct AgentTurnRequest {
     pub billing_mode: Option<String>,
     pub provider: Option<String>,
     pub workspace_root: PathBuf,
-    pub approval_grants: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,12 +175,6 @@ struct CommandOutcome {
     output: String,
 }
 
-#[derive(Debug, Clone)]
-struct ApprovalContext {
-    allow_all: bool,
-    allowed_tools: BTreeSet<String>,
-}
-
 impl ShellSession {
     fn stdout_len(&self) -> usize {
         self.stdout_buf
@@ -212,68 +205,8 @@ impl ShellSession {
     }
 }
 
-impl ToolCall {
-    fn name(&self) -> &'static str {
-        match self {
-            ToolCall::ListFiles { .. } => "list_files",
-            ToolCall::GlobFiles { .. } => "glob_files",
-            ToolCall::GrepFiles { .. } => "grep_files",
-            ToolCall::ReadFile { .. } => "read_file",
-            ToolCall::WriteFile { .. } => "write_file",
-            ToolCall::AppendFile { .. } => "append_file",
-            ToolCall::Bash { .. } => "bash",
-            ToolCall::Mkdir { .. } => "mkdir",
-            ToolCall::MovePath { .. } => "move_path",
-            ToolCall::DeletePath { .. } => "delete_path",
-            ToolCall::ApplyPatch { .. } => "apply_patch",
-            ToolCall::RunTest { .. } => "run_test",
-            ToolCall::RunLint { .. } => "run_lint",
-            ToolCall::BashSessionStart { .. } => "bash_session_start",
-            ToolCall::BashSessionRun { .. } => "bash_session_run",
-            ToolCall::BashSessionOutput { .. } => "bash_session_output",
-            ToolCall::BashSessionKill { .. } => "bash_session_kill",
-            ToolCall::GitStatus { .. } => "git_status",
-            ToolCall::GitDiff { .. } => "git_diff",
-            ToolCall::GitAdd { .. } => "git_add",
-            ToolCall::GitCommit { .. } => "git_commit",
-            ToolCall::Unknown { .. } => "unknown",
-        }
-    }
-}
-
-impl ApprovalContext {
-    fn from_grants(grants: &[String]) -> Self {
-        let mut allow_all = false;
-        let mut allowed_tools = BTreeSet::new();
-
-        for raw in grants {
-            for token in raw.split(|c: char| c == ',' || c.is_ascii_whitespace()) {
-                let normalized = token.trim().to_lowercase();
-                if normalized.is_empty() {
-                    continue;
-                }
-                if normalized == "all" {
-                    allow_all = true;
-                    continue;
-                }
-                allowed_tools.insert(normalized);
-            }
-        }
-
-        Self {
-            allow_all,
-            allowed_tools,
-        }
-    }
-
-    fn allows(&self, tool_name: &str) -> bool {
-        self.allow_all || self.allowed_tools.contains(tool_name)
-    }
-}
-
 pub fn run_agent_turn(client: NanoGptClient, request: AgentTurnRequest) -> Result<AgentTurnResult> {
     let workspace = Workspace::new(request.workspace_root)?;
-    let approval = ApprovalContext::from_grants(&request.approval_grants);
     let agent_system_prompt =
         build_agent_system_prompt(request.system_prompt.as_deref(), &workspace);
 
@@ -317,7 +250,7 @@ pub fn run_agent_turn(client: NanoGptClient, request: AgentTurnRequest) -> Resul
 
         let mut results = Vec::with_capacity(tool_calls.len());
         for call in tool_calls {
-            results.push(execute_tool_call(&workspace, &approval, call));
+            results.push(execute_tool_call(&workspace, call));
         }
 
         messages.push(ConversationMessage {
@@ -398,7 +331,6 @@ fn build_agent_system_prompt(user_system_prompt: Option<&str>, workspace: &Works
         "20) git_add: optional <path>src/main.rs</path> optional <all>true|false</all>".to_string(),
     );
     parts.push("21) git_commit: <message>your commit message</message>".to_string());
-    parts.push("Sensitive tools require explicit user approval. If blocked, ask user to run `/approve <tool>` (or `/approve all`) and resend the request.".to_string());
     parts.push(
         "Use relative paths when possible. Keep tool arguments minimal and valid XML.".to_string(),
     );
@@ -649,22 +581,7 @@ fn parse_u64(value: Option<&str>, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn execute_tool_call(
-    workspace: &Workspace,
-    approval: &ApprovalContext,
-    call: ToolCall,
-) -> ToolResult {
-    let tool_name = call.name();
-    if tool_requires_approval(tool_name) && !approval.allows(tool_name) {
-        return ToolResult::error(
-            tool_name,
-            format!("approval required for {tool_name}"),
-            format!(
-                "tool `{tool_name}` is blocked by approval policy. Ask user to run `/approve {tool_name}` (or `/approve all`) and resend."
-            ),
-        );
-    }
-
+fn execute_tool_call(workspace: &Workspace, call: ToolCall) -> ToolResult {
     match call {
         ToolCall::ListFiles {
             path,
@@ -2140,24 +2057,6 @@ fn tail_text(input: &str, max_chars: usize) -> String {
         .rev()
         .collect::<String>();
     format!("...[truncated]\n{tail}")
-}
-
-fn tool_requires_approval(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "write_file"
-            | "append_file"
-            | "mkdir"
-            | "move_path"
-            | "delete_path"
-            | "apply_patch"
-            | "bash"
-            | "bash_session_start"
-            | "bash_session_run"
-            | "bash_session_kill"
-            | "git_add"
-            | "git_commit"
-    )
 }
 
 fn render_tool_results_prompt(results: &[ToolResult]) -> String {

@@ -86,8 +86,6 @@ You can authenticate with:
 - `/models`
 - `/providers`
 - `/workspace`
-- `/approve <tool|all>` (approve sensitive tools for the next turn)
-- `/approvals` (show queued approvals)
 
 ### Slash autocomplete
 
@@ -145,7 +143,6 @@ In TUI mode, each user message runs through an agent loop:
 - Use `--workspace` to override
 - File tools are restricted to that workspace root
 - Bash tool runs with that workspace as current working directory
-- Sensitive tools require explicit approval each turn (use `/approve`)
 
 ## CLI Examples
 
